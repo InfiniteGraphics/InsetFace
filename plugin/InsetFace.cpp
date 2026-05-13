@@ -504,6 +504,13 @@ public:
 	void AppendLocalizedWarning(std::wstring& target, const char* key) const;
 
 private:
+	enum class ApplySource
+	{
+		Button,
+		Keyboard,
+		Drag,
+	};
+
 	struct DragState
 	{
 		bool Pending;
@@ -556,7 +563,7 @@ private:
 	void SyncDocumentSelection(MQDocument doc, int preferred_object_index = -1);
 	bool IsFaceSelected(int object_index, UINT face_unique_id) const;
 	void ResolveClickSelection(MQDocument doc, int object_index, UINT face_unique_id, bool shift_pressed);
-	void ResetAfterApply(MQDocument doc);
+	void ResetAfterApply(MQDocument doc, ApplySource source);
 
 	bool EnsurePreview(MQDocument doc);
 	bool RebuildPreview(MQDocument doc);
@@ -583,7 +590,7 @@ private:
 	bool SolveRegionEvenOffsetSurfaceAware(TempRegion& region, double depth);
 	MQPoint LiftPoint(const TempRegion& region, const Point2D& point) const;
 
-	bool ApplyPreview(MQDocument doc);
+	bool ApplyPreview(MQDocument doc, ApplySource source = ApplySource::Button);
 	bool ApplyCommitDataToObject(MQDocument doc, MQObject obj, const RegionCommitData& commit_data);
 
 	static MQPoint ComputeFaceNormal(MQObject obj, const std::vector<int>& vertices);
@@ -722,7 +729,7 @@ BOOL InsetFaceWindow::EvenOffsetChanged(MQWidgetBase* sender, MQDocument doc)
 
 BOOL InsetFaceWindow::ApplyClicked(MQWidgetBase* sender, MQDocument doc)
 {
-	m_Plugin->ApplyPreview(doc);
+	m_Plugin->ApplyPreview(doc, InsetFacePlugin::ApplySource::Button);
 	return TRUE;
 }
 
@@ -2187,7 +2194,7 @@ BOOL InsetFacePlugin::OnLeftButtonUp(MQDocument doc, MQScene scene, MOUSE_BUTTON
 	if (m_Drag.Active) {
 		m_Drag.Active = false;
 		m_Drag.Pending = false;
-		bool applied = ApplyPreview(doc);
+		bool applied = ApplyPreview(doc, ApplySource::Drag);
 		m_Drag = DragState();
 		if (!applied) {
 			InvalidatePreview();
@@ -2262,7 +2269,7 @@ BOOL InsetFacePlugin::OnKeyDown(MQDocument doc, MQScene scene, int key, MOUSE_BU
 	if (!m_Activated) return FALSE;
 
 	if (key == VK_RETURN) {
-		if (ApplyPreview(doc)) {
+		if (ApplyPreview(doc, ApplySource::Keyboard)) {
 			RedrawAllScene();
 		}
 		return TRUE;
@@ -2332,19 +2339,20 @@ bool InsetFacePlugin::ApplyCommitDataToObject(MQDocument doc, MQObject obj, cons
 	return true;
 }
 
-void InsetFacePlugin::ResetAfterApply(MQDocument doc)
+void InsetFacePlugin::ResetAfterApply(MQDocument doc, ApplySource source)
 {
 	m_SelectedFaces.clear();
 	ClearDocumentSelection(doc);
-	m_Params.Thickness = 0.0;
-	m_Params.Depth = 0.0;
-	m_Params.EvenOffset = false;
+	if (source == ApplySource::Drag) {
+		m_Params.Thickness = 0.0;
+		m_Params.Depth = 0.0;
+	}
 	ResetToolState(false);
 	if (m_Window) m_Window->SyncFromPlugin();
 	SetStatus();
 }
 
-bool InsetFacePlugin::ApplyPreview(MQDocument doc)
+bool InsetFacePlugin::ApplyPreview(MQDocument doc, ApplySource source)
 {
 	LoadResource();
 	if (m_SelectedFaces.empty()) {
@@ -2372,7 +2380,7 @@ bool InsetFacePlugin::ApplyPreview(MQDocument doc)
 	if (modified) {
 		const std::wstring undo_label = LocalizedText("UndoLabel", L"Inset Face");
 		UpdateUndo(undo_label.c_str());
-		ResetAfterApply(doc);
+		ResetAfterApply(doc, source);
 	}
 	else {
 		InvalidatePreview();
