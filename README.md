@@ -1,5 +1,10 @@
 # InsetFace
 <img height="60px" src="https://github.com/xiangao0904/InsetFace/blob/master/plugin/icon_white.svg" /> <img height="60px" src="https://github.com/xiangao0904/InsetFace/blob/master/plugin/icon_black.svg" />
+<br />
+
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/xiangao0904/InsetFace?style=flat-square&color=0078d4)](https://github.com/xiangao0904/InsetFace/releases)
+[![Website](https://img.shields.io/badge/Site-insetface.pages.dev-informational?style=flat-square)](https://insetface.pages.dev/)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20x64-lightgrey?style=flat-square)](https://github.com/xiangao0904/InsetFace)
 
 `InsetFace` is an independent plugin for **Metasequoia 4** that provides interactive face insetting functionality, complete with a visual installer.
 
@@ -55,7 +60,7 @@
 
 ### Recommended Method
 Run the visual installer directly:
-- **[InsetFaceInstaller.exe](path/to/your/release/InsetFaceInstaller.exe)**
+- **[InsetFaceInstaller.exe](https://github.com/xiangao0904/InsetFace/releases)**
 
 The installer will automatically:
 1. Copy `InsetFace.dll` and `InsetFace.resource.xml`.
