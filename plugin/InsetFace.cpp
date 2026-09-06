@@ -239,6 +239,83 @@ static bool PolygonHasSelfIntersection(const std::vector<Point2D>& polygon)
 	return false;
 }
 
+// Test the whole linear motion, so a contour cannot collapse and reopen
+// between its original and final positions.
+static bool MovingPointsMeet2D(const Point2D& a, const Point2D& da, const Point2D& b, const Point2D& db)
+{
+	Point2D separation = a - b;
+	Point2D velocity = da - db;
+	double speed_squared = Dot2D(velocity, velocity);
+	double time = speed_squared > 0.0 ? std::max(0.0, std::min(1.0, -Dot2D(separation, velocity) / speed_squared)) : 0.0;
+	return Length2D(separation + velocity * time) <= kGeometryEpsilon;
+}
+
+static bool MovingPointTouchesEdge2D(const Point2D& p, const Point2D& dp,
+	const Point2D& a, const Point2D& da, const Point2D& b, const Point2D& db)
+{
+	Point2D edge = b - a, edge_velocity = db - da;
+	Point2D relative = p - a, relative_velocity = dp - da;
+	double c0 = Cross2D(edge, relative);
+	double c1 = Cross2D(edge, relative_velocity) + Cross2D(edge_velocity, relative);
+	double c2 = Cross2D(edge_velocity, relative_velocity);
+	std::vector<double> times;
+	times.push_back(0.0);
+	times.push_back(1.0);
+	double tolerance = 64.0 * std::numeric_limits<double>::epsilon() *
+		std::max(1.0, std::max(std::fabs(c0), std::max(std::fabs(c1), std::fabs(c2))));
+	if (std::fabs(c2) <= tolerance) {
+		if (std::fabs(c1) > tolerance) times.push_back(-c0 / c1);
+		else if (std::fabs(c0) <= tolerance) {
+			// Permanently collinear segments first overlap at an endpoint.
+			if (MovingPointsMeet2D(p, dp, a, da) || MovingPointsMeet2D(p, dp, b, db)) return true;
+		}
+	}
+	else {
+		double discriminant = c1 * c1 - 4.0 * c2 * c0;
+		double discriminant_tolerance = 64.0 * std::numeric_limits<double>::epsilon() *
+			std::max(1.0, c1 * c1 + std::fabs(4.0 * c2 * c0));
+		if (discriminant >= -discriminant_tolerance) {
+			double root = std::sqrt(std::max(0.0, discriminant));
+			double q = -0.5 * (c1 + (c1 < 0.0 ? -root : root));
+			if (q != 0.0) {
+				times.push_back(q / c2);
+				times.push_back(c0 / q);
+			}
+			else times.push_back(-c1 / (2.0 * c2));
+		}
+	}
+	for (size_t i = 0; i < times.size(); ++i) {
+		double t = times[i];
+		if (t < 0.0 || t > 1.0) continue;
+		Point2D point = p + dp * t, start = a + da * t, end = b + db * t;
+		if (Orientation2D(start, end, point) == 0 && OnSegment2D(start, end, point)) return true;
+	}
+	return false;
+}
+
+static bool BoundaryMotionIsValid2D(const std::vector<std::vector<Point2D> >& source,
+	const std::vector<std::vector<Point2D> >& target)
+{
+	for (size_t li = 0; li < source.size(); ++li) {
+		for (size_t vi = 0; vi < source[li].size(); ++vi) {
+			size_t next = (vi + 1) % source[li].size();
+			const Point2D& p = source[li][vi];
+			Point2D dp = target[li][vi] - p;
+			if (!std::isfinite(target[li][vi].X) || !std::isfinite(target[li][vi].Y)) return false;
+			if (MovingPointsMeet2D(p, dp, source[li][next], target[li][next] - source[li][next])) return false;
+			for (size_t lj = 0; lj < source.size(); ++lj) {
+				for (size_t ei = 0; ei < source[lj].size(); ++ei) {
+					size_t end = (ei + 1) % source[lj].size();
+					if (li == lj && (vi == ei || vi == end)) continue;
+					if (MovingPointTouchesEdge2D(p, dp, source[lj][ei], target[lj][ei] - source[lj][ei],
+						source[lj][end], target[lj][end] - source[lj][end])) return false;
+				}
+			}
+		}
+	}
+	return true;
+}
+
 static double PolygonArea3D(const std::vector<MQPoint>& polygon)
 {
 	if (polygon.size() < 3) return 0.0;
@@ -249,6 +326,19 @@ static double PolygonArea3D(const std::vector<MQPoint>& polygon)
 		area += 0.5 * GetSize(cross);
 	}
 	return area;
+}
+
+static MQPoint ComputeFaceNormalFromPoints(const std::vector<MQPoint>& polygon)
+{
+	MQPoint normal(0, 0, 0);
+	for (size_t i = 0; i < polygon.size(); ++i) {
+		const MQPoint& a = polygon[i];
+		const MQPoint& b = polygon[(i + 1) % polygon.size()];
+		normal.x += (a.y - b.y) * (a.z + b.z);
+		normal.y += (a.z - b.z) * (a.x + b.x);
+		normal.z += (a.x - b.x) * (a.y + b.y);
+	}
+	return normal;
 }
 
 struct InsetParameters
@@ -430,14 +520,16 @@ struct PreviewMesh
 	std::vector<PreviewObject> Objects;
 	std::vector<RegionCommitData> CommitData;
 	bool Valid;
+	bool Complete;
 
-	PreviewMesh() : Valid(false) {}
+	PreviewMesh() : Valid(false), Complete(false) {}
 
 	void Clear()
 	{
 		Objects.clear();
 		CommitData.clear();
 		Valid = false;
+		Complete = false;
 	}
 };
 
@@ -582,12 +674,12 @@ private:
 	bool IsRegionNearlyPlanar(const TempRegion& region, const std::vector<FaceInfo>& faces, double thickness) const;
 	void ProjectRegionVertices(TempRegion& region);
 	bool ExtractBoundaryLoops(TempRegion& region);
-	bool OffsetLoop2D(const std::vector<Point2D>& loop_points, double signed_thickness, bool even_offset, std::vector<Point2D>& out_points, std::wstring& warning) const;
-	bool SolveRegionInterior2D(TempRegion& region, double thickness, double depth);
-	bool BuildSurfaceAwareBoundaryTargets(TempRegion& region);
+	bool OffsetLoop2D(const std::vector<Point2D>& loop_points, double signed_thickness, bool even_offset, std::vector<Point2D>& out_points, std::wstring& warning, bool allow_clamp = true) const;
+	bool SolveRegionInterior2D(TempRegion& region, double thickness, double depth, bool even_offset);
+	bool BuildSurfaceAwareBoundaryTargets(TempRegion& region, double thickness, bool even_offset);
 	bool SolveRegionInterior3D(TempRegion& region, double depth);
-	bool SolveRegionEvenOffsetPlanar(TempRegion& region, double thickness, double depth);
-	bool SolveRegionEvenOffsetSurfaceAware(TempRegion& region, double depth);
+	bool SolveRegionPlanar(TempRegion& region, double thickness, double depth, bool even_offset);
+	bool SolveRegionSurfaceAware(TempRegion& region, double thickness, double depth, bool even_offset);
 	MQPoint LiftPoint(const TempRegion& region, const Point2D& point) const;
 
 	bool ApplyPreview(MQDocument doc, ApplySource source = ApplySource::Button);
@@ -595,7 +687,7 @@ private:
 
 	static MQPoint ComputeFaceNormal(MQObject obj, const std::vector<int>& vertices);
 	static MQPoint ComputeVertexNormal(MQObject obj, int vertex_index, const std::set<int>& region_faces);
-	static bool ComputeInsetPolygon(
+	bool ComputeInsetPolygon(
 		const std::vector<MQPoint>& polygon,
 		const std::vector<MQCoordinate>& uv,
 		double thickness,
@@ -603,7 +695,8 @@ private:
 		bool even_offset,
 		std::vector<MQPoint>& inner_points,
 		std::vector<MQCoordinate>& inner_uv,
-		MQPoint* out_face_normal);
+		MQPoint* out_face_normal,
+		std::wstring& warning);
 };
 
 InsetFaceWindow::InsetFaceWindow(int id, InsetFacePlugin* plugin)
@@ -954,6 +1047,9 @@ void InsetFacePlugin::ClearDocumentSelection(MQDocument doc)
 
 void InsetFacePlugin::SyncDocumentSelection(MQDocument doc, int preferred_object_index)
 {
+	// Callers have already changed the local selection; document comparison
+	// cannot detect that change after it has been synchronized.
+	InvalidatePreview();
 	if (preferred_object_index >= 0) {
 		doc->SetCurrentObjectIndex(preferred_object_index);
 	}
@@ -1000,7 +1096,7 @@ void InsetFacePlugin::ResolveClickSelection(MQDocument doc, int object_index, UI
 
 bool InsetFacePlugin::EnsurePreview(MQDocument doc)
 {
-	if (!m_PreviewDirty && m_Preview.Valid) return true;
+	if (!m_PreviewDirty && m_Preview.Valid) return m_Preview.Complete;
 	return RebuildPreview(doc);
 }
 
@@ -1149,7 +1245,8 @@ bool InsetFacePlugin::ComputeInsetPolygon(
 	bool even_offset,
 	std::vector<MQPoint>& inner_points,
 	std::vector<MQCoordinate>& inner_uv,
-	MQPoint* out_face_normal)
+	MQPoint* out_face_normal,
+	std::wstring& warning)
 {
 	inner_points.clear();
 	inner_uv.clear();
@@ -1186,9 +1283,7 @@ bool InsetFacePlugin::ComputeInsetPolygon(
 	}
 
 	std::vector<Point2D> inset_2d;
-	std::wstring warning;
-	InsetFacePlugin temp_plugin;
-	if (!temp_plugin.OffsetLoop2D(polygon_2d, thickness, even_offset, inset_2d, warning)) {
+	if (!OffsetLoop2D(polygon_2d, thickness, even_offset, inset_2d, warning)) {
 		return false;
 	}
 
@@ -1260,7 +1355,7 @@ bool InsetFacePlugin::BuildFaceLocalInset(TempRegion& region, TempFace& face)
 
 	std::vector<MQCoordinate> inner_uv;
 	MQPoint face_normal;
-	if (!ComputeInsetPolygon(polygon, face.UV, m_Params.Thickness, 0.0, m_Params.EvenOffset, face.LocalInsetPoints, inner_uv, &face_normal)) {
+	if (!ComputeInsetPolygon(polygon, face.UV, m_Params.Thickness, 0.0, m_Params.EvenOffset, face.LocalInsetPoints, inner_uv, &face_normal, region.Warning)) {
 		return false;
 	}
 
@@ -1503,7 +1598,7 @@ bool InsetFacePlugin::ExtractBoundaryLoops(TempRegion& region)
 	return true;
 }
 
-bool InsetFacePlugin::OffsetLoop2D(const std::vector<Point2D>& loop_points, double signed_thickness, bool even_offset, std::vector<Point2D>& out_points, std::wstring& warning) const
+bool InsetFacePlugin::OffsetLoop2D(const std::vector<Point2D>& loop_points, double signed_thickness, bool even_offset, std::vector<Point2D>& out_points, std::wstring& warning, bool allow_clamp) const
 {
 	out_points.clear();
 	if (loop_points.size() < 3) return false;
@@ -1516,7 +1611,7 @@ bool InsetFacePlugin::OffsetLoop2D(const std::vector<Point2D>& loop_points, doub
 	double orientation = source_area >= 0.0 ? 1.0 : -1.0;
 
 	double scale = 1.0;
-	for (int attempt = 0; attempt < 8; ++attempt) {
+	for (int attempt = 0; attempt < (allow_clamp ? 24 : 1); ++attempt) {
 		double distance = signed_thickness * scale;
 		std::vector<Point2D> candidate(loop_points.size());
 		bool had_parallel_fallback = false;
@@ -1591,7 +1686,8 @@ bool InsetFacePlugin::OffsetLoop2D(const std::vector<Point2D>& loop_points, doub
 		}
 
 		double area = PolygonArea2D(candidate);
-		if (std::fabs(area) <= kGeometryEpsilon || (area > 0.0) != (source_area > 0.0) || PolygonHasSelfIntersection(candidate)) {
+		if (std::fabs(area) <= kGeometryEpsilon || (area > 0.0) != (source_area > 0.0) || PolygonHasSelfIntersection(candidate) ||
+			!BoundaryMotionIsValid2D(std::vector<std::vector<Point2D> >(1, loop_points), std::vector<std::vector<Point2D> >(1, candidate))) {
 			scale *= 0.5;
 			continue;
 		}
@@ -1611,7 +1707,7 @@ MQPoint InsetFacePlugin::LiftPoint(const TempRegion& region, const Point2D& poin
 	return region.PlaneOrigin + region.PlaneU * (float)point.X + region.PlaneV * (float)point.Y;
 }
 
-bool InsetFacePlugin::SolveRegionInterior2D(TempRegion& region, double thickness, double depth)
+bool InsetFacePlugin::SolveRegionInterior2D(TempRegion& region, double thickness, double depth, bool even_offset)
 {
 	std::vector<bool> fixed(region.Vertices.size(), false);
 	std::vector<std::vector<int> > adjacency(region.Vertices.size());
@@ -1622,25 +1718,42 @@ bool InsetFacePlugin::SolveRegionInterior2D(TempRegion& region, double thickness
 		adjacency[halfedge.EndVertex].push_back(halfedge.StartVertex);
 	}
 
+	std::vector<std::vector<Point2D> > source_loops(region.BoundaryLoops.size());
+	std::vector<std::vector<Point2D> > inset_loops(region.BoundaryLoops.size());
 	for (size_t li = 0; li < region.BoundaryLoops.size(); ++li) {
-		std::vector<Point2D> loop_points(region.BoundaryLoops[li].Vertices.size());
 		for (size_t vi = 0; vi < region.BoundaryLoops[li].Vertices.size(); ++vi) {
-			loop_points[vi] = region.Vertices[region.BoundaryLoops[li].Vertices[vi]].OriginalProjected;
+			source_loops[li].push_back(region.Vertices[region.BoundaryLoops[li].Vertices[vi]].OriginalProjected);
 		}
-
-		std::vector<Point2D> inset_points;
-		std::wstring loop_warning;
-		double signed_thickness = region.BoundaryLoops[li].IsHole ? -thickness : thickness;
-		if (!OffsetLoop2D(loop_points, signed_thickness, true, inset_points, loop_warning)) {
-			AppendWarning(region.Warning, loop_warning);
-			return false;
+	}
+	bool boundary_valid = false;
+	double boundary_scale = 1.0;
+	for (int attempt = 0; attempt < 24; ++attempt, boundary_scale *= 0.5) {
+		bool loops_valid = true;
+		std::wstring attempt_warning;
+		for (size_t li = 0; li < region.BoundaryLoops.size(); ++li) {
+			double signed_thickness = (region.BoundaryLoops[li].IsHole ? -thickness : thickness) * boundary_scale;
+			if (!OffsetLoop2D(source_loops[li], signed_thickness, even_offset, inset_loops[li], attempt_warning, false)) {
+				loops_valid = false;
+				break;
+			}
 		}
-		AppendWarning(region.Warning, loop_warning);
-
+		// No contact during motion also preserves the initial containment of holes.
+		if (loops_valid && BoundaryMotionIsValid2D(source_loops, inset_loops)) {
+			AppendWarning(region.Warning, attempt_warning);
+			if (boundary_scale < 0.999) AppendLocalizedWarning(region.Warning, "WarnCollapsedClamped");
+			boundary_valid = true;
+			break;
+		}
+	}
+	if (!boundary_valid) {
+		AppendLocalizedWarning(region.Warning, "WarnCollapsed");
+		return false;
+	}
+	for (size_t li = 0; li < region.BoundaryLoops.size(); ++li) {
 		for (size_t vi = 0; vi < region.BoundaryLoops[li].Vertices.size(); ++vi) {
 			int vertex_index = region.BoundaryLoops[li].Vertices[vi];
 			fixed[vertex_index] = true;
-			region.Vertices[vertex_index].NewProjected = inset_points[vi];
+			region.Vertices[vertex_index].NewProjected = inset_loops[li][vi];
 		}
 	}
 
@@ -1652,78 +1765,106 @@ bool InsetFacePlugin::SolveRegionInterior2D(TempRegion& region, double thickness
 			Point2D sum(0.0, 0.0);
 			int count = 0;
 			for (size_t ni = 0; ni < adjacency[vi].size(); ++ni) {
-				sum += region.Vertices[adjacency[vi][ni]].NewProjected;
+				const TempVertex& neighbor = region.Vertices[adjacency[vi][ni]];
+				sum += neighbor.NewProjected - neighbor.OriginalProjected;
 				++count;
 			}
 			if (count > 0) {
-				region.Vertices[vi].NewProjected = sum / (double)count;
+				region.Vertices[vi].NewProjected = region.Vertices[vi].OriginalProjected + sum / (double)count;
 			}
 		}
 	}
 
 	for (size_t vi = 0; vi < region.Vertices.size(); ++vi) {
-		region.Vertices[vi].NewPosition = LiftPoint(region, region.Vertices[vi].NewProjected) + region.Vertices[vi].AverageNormal * (float)depth;
+		// Apply the solved displacement to retain any original height above the fitted plane.
+		const Point2D displacement = region.Vertices[vi].NewProjected - region.Vertices[vi].OriginalProjected;
+		region.Vertices[vi].NewPosition = region.Vertices[vi].OriginalPosition
+			+ region.PlaneU * (float)displacement.X + region.PlaneV * (float)displacement.Y
+			+ region.Vertices[vi].AverageNormal * (float)depth;
 	}
 	return true;
 }
 
-bool InsetFacePlugin::BuildSurfaceAwareBoundaryTargets(TempRegion& region)
+bool InsetFacePlugin::BuildSurfaceAwareBoundaryTargets(TempRegion& region, double thickness, bool even_offset)
 {
-	std::vector<MQPoint> tangent_sum(region.Vertices.size(), MQPoint(0, 0, 0));
-	std::vector<double> weight_sum(region.Vertices.size(), 0.0);
-
-	for (size_t fi = 0; fi < region.Faces.size(); ++fi) {
-		TempFace& face = region.Faces[fi];
-		if (face.LocalInsetPoints.size() != face.Vertices.size()) {
+	std::vector<int> incoming(region.Vertices.size(), -1), outgoing(region.Vertices.size(), -1);
+	bool has_boundary = false;
+	for (size_t hi = 0; hi < region.HalfEdges.size(); ++hi) {
+		const TempHalfEdge& edge = region.HalfEdges[hi];
+		if (!edge.Boundary) continue;
+		has_boundary = true;
+		if (outgoing[edge.StartVertex] != -1 || incoming[edge.EndVertex] != -1) {
+			AppendLocalizedWarning(region.Warning, "WarnNonManifoldSkipped");
 			return false;
 		}
-
-		std::vector<MQPoint> polygon(face.Vertices.size());
-		for (size_t vi = 0; vi < face.Vertices.size(); ++vi) {
-			polygon[vi] = region.Vertices[face.Vertices[vi]].OriginalPosition;
-		}
-
-		for (size_t vi = 0; vi < face.Vertices.size(); ++vi) {
-			const int temp_vertex_index = face.Vertices[vi];
-			TempVertex& vertex = region.Vertices[temp_vertex_index];
-			if (!vertex.Boundary) {
-				continue;
-			}
-
-			MQPoint average_normal = vertex.AverageNormal;
-			if (GetInnerProduct(average_normal, average_normal) <= 1e-12f) {
-				average_normal = face.FaceNormal;
-			}
-			if (GetInnerProduct(average_normal, average_normal) <= 1e-12f) {
-				average_normal = MQPoint(0, 0, 1);
-			}
-			average_normal = Normalize(average_normal);
-
-			MQPoint local_offset = face.LocalInsetPoints[vi] - vertex.OriginalPosition;
-			MQPoint tangent_offset = ProjectVectorToPlane(local_offset, average_normal);
-			double weight = ComputeFaceCornerWeight(polygon, vi, face.FaceNormal);
-			tangent_sum[temp_vertex_index] += tangent_offset * (float)weight;
-			weight_sum[temp_vertex_index] += weight;
-		}
+		outgoing[edge.StartVertex] = (int)hi;
+		incoming[edge.EndVertex] = (int)hi;
 	}
-
+	if (!has_boundary) {
+		AppendLocalizedWarning(region.Warning, "WarnBoundaryExtractionFailed");
+		return false;
+	}
 	for (size_t vi = 0; vi < region.Vertices.size(); ++vi) {
 		TempVertex& vertex = region.Vertices[vi];
 		vertex.BoundaryTargetPosition = vertex.OriginalPosition;
-		if (!vertex.Boundary) {
-			continue;
-		}
-		if (weight_sum[vi] <= kGeometryEpsilon) {
+		if (!vertex.Boundary) continue;
+		if (incoming[vi] == -1 || outgoing[vi] == -1) {
+			AppendLocalizedWarning(region.Warning, "WarnBoundaryExtractionFailed");
 			return false;
 		}
-		MQPoint average_normal = vertex.AverageNormal;
-		if (GetInnerProduct(average_normal, average_normal) <= 1e-12f) {
-			average_normal = MQPoint(0, 0, 1);
+		MQPoint normal = vertex.AverageNormal;
+		if (GetInnerProduct(normal, normal) <= 1e-12f) normal = MQPoint(0, 0, 1);
+		normal = Normalize(normal);
+		MQPoint inward[2];
+		const int edges[2] = { incoming[vi], outgoing[vi] };
+		for (int i = 0; i < 2; ++i) {
+			const TempHalfEdge& edge = region.HalfEdges[edges[i]];
+			const MQPoint direction = region.Vertices[edge.EndVertex].OriginalPosition
+				- region.Vertices[edge.StartVertex].OriginalPosition;
+			// Only exposed edges constrain the inset; selected internal seams do not.
+			inward[i] = ProjectVectorToPlane(GetCrossProduct(region.Faces[edge.FaceIndex].FaceNormal, direction), normal);
+			if (GetInnerProduct(inward[i], inward[i]) <= 1e-12f) {
+				AppendLocalizedWarning(region.Warning, "WarnDegenerateBoundarySkipped");
+				return false;
+			}
+			inward[i] = Normalize(inward[i]);
 		}
-		average_normal = Normalize(average_normal);
-		MQPoint tangent_offset = tangent_sum[vi] / (float)weight_sum[vi];
-		tangent_offset = ProjectVectorToPlane(tangent_offset, average_normal);
-		vertex.BoundaryTargetPosition = vertex.OriginalPosition + tangent_offset;
+		MQPoint displacement(0, 0, 0);
+		if (!even_offset) {
+			MQPoint bisector = inward[0] + inward[1];
+			if (GetInnerProduct(bisector, bisector) <= 1e-12f) bisector = inward[0];
+			displacement = Normalize(bisector) * (float)thickness;
+			vertex.BoundaryTargetPosition = vertex.OriginalPosition + displacement;
+			continue;
+		}
+		// Solve dot(d,inward0)=t, dot(d,inward1)=t, dot(d,normal)=0.
+		MQPoint cross01 = GetCrossProduct(inward[1], normal);
+		MQPoint cross12 = GetCrossProduct(normal, inward[0]);
+		double determinant = GetInnerProduct(inward[0], cross01);
+		if (std::fabs(determinant) > 1e-8) {
+			displacement = (cross01 + cross12) * (float)(thickness / determinant);
+		}
+		else {
+			MQPoint bisector = inward[0] + inward[1];
+			if (GetInnerProduct(bisector, bisector) <= 1e-12f) {
+				AppendLocalizedWarning(region.Warning, "WarnDegenerateBoundarySkipped");
+				return false;
+			}
+			displacement = Normalize(bisector) * (float)thickness;
+			AppendLocalizedWarning(region.Warning, "WarnParallelEdgeFallback");
+		}
+		displacement = ProjectVectorToPlane(displacement, normal);
+		const double max_miter = std::fabs(thickness) * kMaxMiterFactor;
+		const double displacement_length = GetSize(displacement);
+		if (max_miter > 0.0 && displacement_length > max_miter) {
+			displacement *= (float)(max_miter / displacement_length);
+			AppendLocalizedWarning(region.Warning, "WarnParallelEdgeFallback");
+		}
+		if (!std::isfinite(displacement.x) || !std::isfinite(displacement.y) || !std::isfinite(displacement.z)) {
+			AppendLocalizedWarning(region.Warning, "WarnDegenerateBoundarySkipped");
+			return false;
+		}
+		vertex.BoundaryTargetPosition = vertex.OriginalPosition + displacement;
 	}
 
 	return true;
@@ -1733,15 +1874,23 @@ bool InsetFacePlugin::SolveRegionInterior3D(TempRegion& region, double depth)
 {
 	std::vector<bool> fixed(region.Vertices.size(), false);
 	std::vector<std::vector<int> > adjacency(region.Vertices.size());
+	std::vector<std::vector<std::pair<int, double> > > weighted_adjacency(region.Vertices.size());
 
 	for (size_t hi = 0; hi < region.HalfEdges.size(); ++hi) {
 		const TempHalfEdge& halfedge = region.HalfEdges[hi];
 		adjacency[halfedge.StartVertex].push_back(halfedge.EndVertex);
 		adjacency[halfedge.EndVertex].push_back(halfedge.StartVertex);
 	}
-
-	if (!SolvePatchInsetVertices(region, 0.0)) {
-		return false;
+	for (size_t vi = 0; vi < adjacency.size(); ++vi) {
+		std::map<int, double> unique_weights;
+		for (size_t ni = 0; ni < adjacency[vi].size(); ++ni) {
+			const MQPoint delta = region.Vertices[adjacency[vi][ni]].OriginalPosition - region.Vertices[vi].OriginalPosition;
+			double length = GetSize(delta);
+			if (length > 1e-8 && std::isfinite(length)) unique_weights[adjacency[vi][ni]] += 1.0 / length;
+		}
+		for (std::map<int, double>::const_iterator it = unique_weights.begin(); it != unique_weights.end(); ++it) {
+			weighted_adjacency[vi].push_back(std::make_pair(it->first, it->second));
+		}
 	}
 
 	for (size_t vi = 0; vi < region.Vertices.size(); ++vi) {
@@ -1752,25 +1901,39 @@ bool InsetFacePlugin::SolveRegionInterior3D(TempRegion& region, double depth)
 		}
 		average_normal = Normalize(average_normal);
 
-		MQPoint tangent_offset = ProjectVectorToPlane(vertex.NewPosition - vertex.OriginalPosition, average_normal);
-		vertex.SolvedTangentOffset = tangent_offset;
+		vertex.SolvedTangentOffset = MQPoint(0, 0, 0);
 		if (vertex.Boundary) {
 			vertex.SolvedTangentOffset = ProjectVectorToPlane(vertex.BoundaryTargetPosition - vertex.OriginalPosition, average_normal);
 			fixed[vi] = true;
 		}
 	}
 
-	for (int iteration = 0; iteration < kInteriorSolveIterations; ++iteration) {
+	MQPoint min_point(0, 0, 0), max_point(0, 0, 0);
+	if (!region.Vertices.empty()) min_point = max_point = region.Vertices[0].OriginalPosition;
+	for (size_t vi = 1; vi < region.Vertices.size(); ++vi) {
+		const MQPoint& p = region.Vertices[vi].OriginalPosition;
+		min_point.x = std::min(min_point.x, p.x); min_point.y = std::min(min_point.y, p.y); min_point.z = std::min(min_point.z, p.z);
+		max_point.x = std::max(max_point.x, p.x); max_point.y = std::max(max_point.y, p.y); max_point.z = std::max(max_point.z, p.z);
+	}
+	double model_scale = std::max(1.0, (double)GetSize(max_point - min_point));
+	const double solve_epsilon = model_scale * 1e-6;
+	std::vector<MQPoint> next_offsets(region.Vertices.size(), MQPoint(0, 0, 0));
+	for (int iteration = 0; iteration < 300; ++iteration) {
+		double max_change = 0.0;
 		for (size_t vi = 0; vi < region.Vertices.size(); ++vi) {
-			if (fixed[vi] || adjacency[vi].empty()) continue;
+			if (fixed[vi] || weighted_adjacency[vi].empty()) {
+				next_offsets[vi] = region.Vertices[vi].SolvedTangentOffset;
+				continue;
+			}
 
 			MQPoint sum(0, 0, 0);
-			int count = 0;
-			for (size_t ni = 0; ni < adjacency[vi].size(); ++ni) {
-				sum += region.Vertices[adjacency[vi][ni]].SolvedTangentOffset;
-				++count;
+			double weight_sum = 0.0;
+			for (size_t ni = 0; ni < weighted_adjacency[vi].size(); ++ni) {
+				sum += region.Vertices[weighted_adjacency[vi][ni].first].SolvedTangentOffset * (float)weighted_adjacency[vi][ni].second;
+				weight_sum += weighted_adjacency[vi][ni].second;
 			}
-			if (count <= 0) {
+			if (weight_sum <= 0.0) {
+				next_offsets[vi] = region.Vertices[vi].SolvedTangentOffset;
 				continue;
 			}
 
@@ -1780,9 +1943,12 @@ bool InsetFacePlugin::SolveRegionInterior3D(TempRegion& region, double depth)
 			}
 			average_normal = Normalize(average_normal);
 
-			MQPoint averaged = sum / (float)count;
-			region.Vertices[vi].SolvedTangentOffset = ProjectVectorToPlane(averaged, average_normal);
+			MQPoint averaged = sum / (float)weight_sum;
+			next_offsets[vi] = ProjectVectorToPlane(averaged, average_normal);
+			max_change = std::max(max_change, (double)GetSize(next_offsets[vi] - region.Vertices[vi].SolvedTangentOffset));
 		}
+		for (size_t vi = 0; vi < region.Vertices.size(); ++vi) region.Vertices[vi].SolvedTangentOffset = next_offsets[vi];
+		if (max_change <= solve_epsilon) break;
 	}
 
 	for (size_t vi = 0; vi < region.Vertices.size(); ++vi) {
@@ -1798,21 +1964,52 @@ bool InsetFacePlugin::SolveRegionInterior3D(TempRegion& region, double depth)
 	return true;
 }
 
-bool InsetFacePlugin::SolveRegionEvenOffsetPlanar(TempRegion& region, double thickness, double depth)
+bool InsetFacePlugin::SolveRegionPlanar(TempRegion& region, double thickness, double depth, bool even_offset)
 {
 	ProjectRegionVertices(region);
 	if (!ExtractBoundaryLoops(region)) {
 		return false;
 	}
-	return SolveRegionInterior2D(region, thickness, depth);
+	return SolveRegionInterior2D(region, thickness, depth, even_offset);
 }
 
-bool InsetFacePlugin::SolveRegionEvenOffsetSurfaceAware(TempRegion& region, double depth)
+bool InsetFacePlugin::SolveRegionSurfaceAware(TempRegion& region, double thickness, double depth, bool even_offset)
 {
-	if (!BuildSurfaceAwareBoundaryTargets(region)) {
-		return false;
+	const double original_thickness = thickness;
+	for (int attempt = 0; attempt < 24; ++attempt) {
+		const double scale = std::pow(0.5, (double)attempt);
+		if (!BuildSurfaceAwareBoundaryTargets(region, original_thickness * scale, even_offset)) continue;
+		if (!SolveRegionInterior3D(region, depth)) continue;
+
+		bool valid = true;
+		for (size_t fi = 0; fi < region.Faces.size() && valid; ++fi) {
+			const TempFace& face = region.Faces[fi];
+			std::vector<MQPoint> original(face.Vertices.size()), updated(face.Vertices.size());
+			for (size_t vi = 0; vi < face.Vertices.size(); ++vi) {
+				const TempVertex& vertex = region.Vertices[face.Vertices[vi]];
+				original[vi] = vertex.OriginalPosition;
+				updated[vi] = vertex.NewPosition;
+				if (!std::isfinite(updated[vi].x) || !std::isfinite(updated[vi].y) || !std::isfinite(updated[vi].z)) valid = false;
+			}
+			if (!valid || original.size() < 3) continue;
+			MQPoint old_normal = ComputeFaceNormalFromPoints(original);
+			MQPoint new_normal = ComputeFaceNormalFromPoints(updated);
+			const float old_area2 = GetInnerProduct(old_normal, old_normal);
+			const float new_area2 = GetInnerProduct(new_normal, new_normal);
+			if (old_area2 <= 1e-12f || new_area2 <= old_area2 * 1e-8f || GetInnerProduct(old_normal, new_normal) <= 0.0f) valid = false;
+			for (size_t vi = 0; vi < updated.size() && valid; ++vi) {
+				const float old_edge_length = GetSize(original[(vi + 1) % original.size()] - original[vi]);
+				const float new_edge_length = GetSize(updated[(vi + 1) % updated.size()] - updated[vi]);
+				if (old_edge_length <= 1e-8f || new_edge_length <= old_edge_length * 1e-6f) valid = false;
+			}
+		}
+		if (valid) {
+			if (attempt > 0) AppendLocalizedWarning(region.Warning, "WarnCollapsedClamped");
+			return true;
+		}
 	}
-	return SolveRegionInterior3D(region, depth);
+	AppendLocalizedWarning(region.Warning, "WarnCollapsed");
+	return false;
 }
 
 bool InsetFacePlugin::BuildTempRegion(MQObject obj, int object_index, const std::vector<FaceInfo>& faces, TempRegion& region)
@@ -1851,6 +2048,23 @@ bool InsetFacePlugin::BuildTempRegion(MQObject obj, int object_index, const std:
 			temp_face.Vertices.push_back(found->second);
 		}
 
+		// Reject structurally degenerate input independently of the chosen offset solver.
+		std::set<int> distinct_vertices(temp_face.Vertices.begin(), temp_face.Vertices.end());
+		bool valid_face = temp_face.Vertices.size() >= 3 && distinct_vertices.size() == temp_face.Vertices.size();
+		std::vector<MQPoint> polygon(temp_face.Vertices.size());
+		for (size_t vi = 0; vi < temp_face.Vertices.size(); ++vi) {
+			polygon[vi] = region.Vertices[temp_face.Vertices[vi]].OriginalPosition;
+			const MQPoint& next = region.Vertices[temp_face.Vertices[(vi + 1) % temp_face.Vertices.size()]].OriginalPosition;
+			valid_face = valid_face && std::isfinite(polygon[vi].x) && std::isfinite(polygon[vi].y)
+				&& std::isfinite(polygon[vi].z) && GetSize(next - polygon[vi]) > 0.0f;
+		}
+		const double area = PolygonArea3D(polygon);
+		if (!valid_face || !std::isfinite(area) || area <= 0.0) {
+			wchar_t detail[256];
+			swprintf_s(detail, LocalizedText("WarnInvalidFaceInput", L"Invalid face input (object %d, face %d)").c_str(), object_index + 1, temp_face.OriginalFaceIndex + 1);
+			AppendWarning(region.Warning, detail);
+			return false;
+		}
 		region.Faces.push_back(temp_face);
 	}
 
@@ -1894,28 +2108,28 @@ bool InsetFacePlugin::BuildTempRegion(MQObject obj, int object_index, const std:
 	}
 
 	ClassifyBoundaryElements(region);
-	for (size_t fi = 0; fi < region.Faces.size(); ++fi) {
+	const bool region_mode = m_Params.CurrentMode == InsetParameters::ModeRegion;
+	bool nearly_planar = false;
+	if (region_mode) {
+		if (!FitLocalPlane(region, faces)) return false;
+		nearly_planar = IsRegionNearlyPlanar(region, faces, m_Params.Thickness);
+	}
+	// Region + EvenOffset is solved from the complete boundary. Other paths
+	// still use the per-face inset as their local displacement source.
+	for (size_t fi = 0; !region_mode && fi < region.Faces.size(); ++fi) {
 		if (!BuildFaceLocalInset(region, region.Faces[fi])) {
 			AppendLocalizedWarning(region.Warning, "WarnFaceInsetFailed");
 			return false;
 		}
 	}
 
-	if (m_Params.CurrentMode == InsetParameters::ModeRegion && m_Params.EvenOffset) {
-		if (!FitLocalPlane(region, faces)) {
-			return false;
-		}
-		const bool nearly_planar = IsRegionNearlyPlanar(region, faces, m_Params.Thickness);
+	if (region_mode) {
 		bool solved = false;
 		if (nearly_planar) {
-			solved = SolveRegionEvenOffsetPlanar(region, m_Params.Thickness, m_Params.Depth);
+			solved = SolveRegionPlanar(region, m_Params.Thickness, m_Params.Depth, m_Params.EvenOffset);
 		}
 		else {
-			solved = SolveRegionEvenOffsetSurfaceAware(region, m_Params.Depth);
-			if (!solved) {
-				AppendLocalizedWarning(region.Warning, "WarnSurfaceAwareFallback");
-				solved = SolvePatchInsetVertices(region, m_Params.Depth);
-			}
+			solved = SolveRegionSurfaceAware(region, m_Params.Thickness, m_Params.Depth, m_Params.EvenOffset);
 		}
 		if (!solved) {
 			AppendLocalizedWarning(region.Warning, "WarnPatchSolveFailed");
@@ -2018,6 +2232,7 @@ bool InsetFacePlugin::RebuildPreview(MQDocument doc)
 
 	int object_count = doc->GetObjectCount();
 	m_Preview.Objects.resize(object_count);
+	size_t completed_faces = 0;
 
 	for (int oi = 0; oi < object_count; ++oi) {
 		std::vector<FaceInfo> faces;
@@ -2030,13 +2245,18 @@ bool InsetFacePlugin::RebuildPreview(MQDocument doc)
 			RegionCommitData commit_data;
 			if (BuildPreviewForFaceGroup(doc, oi, groups[gi], m_Preview.Objects[oi], commit_data) && commit_data.Region.Valid) {
 				m_Preview.CommitData.push_back(commit_data);
+				completed_faces += groups[gi].size();
 			}
 		}
 	}
 
 	m_Preview.Valid = true;
+	m_Preview.Complete = !m_SelectedFaces.empty() && completed_faces == m_SelectedFaces.size();
+	if (!m_SelectedFaces.empty() && !m_Preview.Complete) {
+		AppendLocalizedWarning(m_LastWarning, "WarnIncompletePreview");
+	}
 	SetStatus();
-	return true;
+	return m_Preview.Complete;
 }
 
 void InsetFacePlugin::OnDraw(MQDocument doc, MQScene scene, int width, int height)
@@ -2361,8 +2581,8 @@ bool InsetFacePlugin::ApplyPreview(MQDocument doc, ApplySource source)
 		return false;
 	}
 	if (!EnsurePreview(doc)) {
-		const std::wstring text = LocalizedText("StatusPreviewBuildFailed", L"Inset Face: preview build failed.");
-		SetStatusString(text.c_str());
+		// Preserve both the selection and the detailed failure diagnostics.
+		SetStatus();
 		return false;
 	}
 

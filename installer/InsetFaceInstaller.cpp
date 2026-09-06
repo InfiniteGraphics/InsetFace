@@ -30,7 +30,7 @@ const wchar_t* kRegistryUninstall = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersi
 const wchar_t* kRegistryUninstallWow6432 = L"SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
 const wchar_t* kRegistryAppPaths = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Metaseq.exe";
 const char* kWidgetName = "BtnComPlugin.56a31d20.5a1e7f44.0";
-const char* kInstallerVersion = "1";
+const char* kInstallerVersion = "1.01";
 
 enum class InstallAction
 {

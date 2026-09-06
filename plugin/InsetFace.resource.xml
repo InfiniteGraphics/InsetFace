@@ -26,6 +26,8 @@
     <string id="WarnCollapsedClamped">オフセットが潰れたため制限しました</string>
     <string id="WarnCollapsed">オフセットが潰れました</string>
     <string id="WarnFaceInsetFailed">面ごとのインセットに失敗しました</string>
+    <string id="WarnInvalidFaceInput">無効な面（オブジェクト %d、面 %d）：重複頂点、無効な座標、または面積ゼロ</string>
+    <string id="WarnIncompletePreview">選択面の一部をプレビューできないため、変更は適用されませんでした。パラメータまたは選択範囲を調整してください。</string>
     <string id="WarnPatchSolveFailed">リージョンの解決に失敗しました</string>
     <string id="WarnSurfaceAwareFallback">曲面対応オフセットに失敗したため通常リージョン解へフォールバックしました</string>
   </resource>
@@ -55,6 +57,8 @@
     <string id="WarnCollapsedClamped">偏移塌缩，已限制</string>
     <string id="WarnCollapsed">偏移塌缩</string>
     <string id="WarnFaceInsetFailed">单面内插失败</string>
+    <string id="WarnInvalidFaceInput">输入面退化或坐标无效（对象 %d，面 %d）：请检查重复顶点和零面积面</string>
+    <string id="WarnIncompletePreview">部分选面无法生成预览，未应用任何修改；请调整参数或选区</string>
     <string id="WarnPatchSolveFailed">区域求解失败</string>
     <string id="WarnSurfaceAwareFallback">曲面感知均等偏移失败，已回退到普通区域求解</string>
   </resource>
@@ -84,6 +88,8 @@
     <string id="WarnCollapsedClamped">collapsed, clamped</string>
     <string id="WarnCollapsed">collapsed</string>
     <string id="WarnFaceInsetFailed">face inset failed</string>
+    <string id="WarnInvalidFaceInput">Invalid face input (object %d, face %d): check duplicate vertices, invalid coordinates, or zero area</string>
+    <string id="WarnIncompletePreview">Some selected faces could not be previewed; nothing was applied. Adjust the parameters or selection.</string>
     <string id="WarnPatchSolveFailed">patch solve failed</string>
     <string id="WarnSurfaceAwareFallback">surface-aware even offset failed, fell back to patch solve</string>
   </resource>
